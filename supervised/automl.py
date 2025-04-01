@@ -431,7 +431,9 @@ class AutoML(BaseAutoML):
         try:
             original_backend = matplotlib.get_backend()
             matplotlib.use("Agg")
-            return self._fit(X, y, sample_weight, cv, sensitive_features)
+            result = self._fit(X, y, sample_weight, cv, sensitive_features)
+            self._save_custom_report()
+            return result
         except Exception as e:
             raise e
         finally:
@@ -455,6 +457,83 @@ class AutoML(BaseAutoML):
             AutoMLException: Model has not yet been fitted.
         """
         return self._predict(X)
+    
+    def _save_custom_report(self):
+        import os
+        import json
+        import pandas as pd
+
+        leaderboard_path = os.path.join(self.results_path, "leaderboard.csv")
+        if not os.path.exists(leaderboard_path):
+            return
+
+        leaderboard = pd.read_csv(leaderboard_path)
+        best_row = leaderboard.sort_values(by="metric_value").iloc[0]
+        best_model_id = best_row["name"]
+        best_model_type = best_row["model_type"]
+        metric_name = best_row["metric_type"]
+        metric_value = round(best_row["metric_value"], 5)
+        train_time = round(best_row["train_time"], 2)
+
+        result = {
+            "best_model_id": best_model_id,
+            "model_type": best_model_type,
+            "metric_name": metric_name,
+            "metric_value": metric_value,
+            "train_time_sec": train_time,
+            "preprocessing": [],
+            "hyperparameters": {},
+            "features": [],
+            "ensemble_components": []
+        }
+
+        model_folder = os.path.join(self.results_path, best_model_id)
+
+        def load_json_file(filename):
+            path = os.path.join(model_folder, filename)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            return {}
+
+        result["hyperparameters"] = load_json_file("params.json")
+        preprocessing = load_json_file("preprocessing.json")
+        if preprocessing:
+            result["preprocessing"] = [{"step": k, "description": v} for k, v in preprocessing.items()]
+        features = load_json_file("features.json")
+        if isinstance(features, list):
+            result["features"] = features
+
+        if best_model_type.lower() == "ensemble":
+            ensemble_path = os.path.join(self.results_path, best_model_id, "ensemble.json")
+            if os.path.exists(ensemble_path):
+                with open(ensemble_path, "r", encoding="utf-8") as f:
+                    ensemble_info = json.load(f)
+                selected_models = ensemble_info.get("selected_models", [])
+                for model_entry in selected_models:
+                    model_id = model_entry.get("model")
+                    repeat = model_entry.get("repeat", 1.0)
+                    row = leaderboard[leaderboard["name"] == model_id]
+                    if not row.empty:
+                        row = row.iloc[0]
+                        result["ensemble_components"].append({
+                            "model_id": model_id,
+                            "model_type": row["model_type"],
+                            "metric_value": round(row["metric_value"], 5),
+                            "repeat": int(repeat)
+                        })
+                    else:
+                        result["ensemble_components"].append({
+                            "model_id": model_id,
+                            "model_type": "unknown",
+                            "metric_value": None,
+                            "repeat": int(repeat)
+                        })
+
+        report_path = os.path.join(self.results_path, "report.json")
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
 
     def predict_proba(
         self, X: Union[List, numpy.ndarray, pandas.DataFrame]
